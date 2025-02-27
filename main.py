@@ -4,7 +4,7 @@ import pickle
 import argparse
 import time
 from torch import maximum, optim
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import itertools
 sys.path.append(os.getcwd())
 from utils import *
@@ -15,13 +15,16 @@ from motion_pred.utils.visualization import render_animation
 from models.motion_pred import *
 from utils import util, valid_angle_check
 from utils.metrics import *
+from FID.fid import fid
+from FID.fid_classifier import classifier_fid_factory
 from scipy.spatial.distance import pdist, squareform
 from tqdm import tqdm
 import random
+import re
 import time
 
+
 def recon_loss(Y_g, Y, Y_mm, Y_hg=None, Y_h=None):
-    
     stat = torch.zeros(Y_g.shape[2])
     diff = Y_g - Y.unsqueeze(2) # TBMV
     dist = diff.pow(2).sum(dim=-1).sum(dim=0) # BM
@@ -208,9 +211,8 @@ def train(epoch, stats):
     losses_str = ' '.join(['{}: {:.4f}'.format(x, y) for x, y in zip(loss_names, train_losses)])
     lr = optimizer.param_groups[0]['lr']
     # average cost of log time 20s
-    tb_logger.add_scalar('train_grad', train_grad / total_num_sample, epoch)
-    
-    logger.info('====> Epoch: {} Time: {:.2f} {}  lr: {:.5f} branch_stats: {}'.format(epoch, time.time() - t_s, losses_str , lr, stats))
+    # tb_logger.add_scalar('train_grad', train_grad / total_num_sample, epoch)
+    # logger.info('====> Epoch: {} Time: {:.2f} {}  lr: {:.5f} branch_stats: {}'.format(epoch, time.time() - t_s, losses_str , lr, stats))
     
     return stats
 
@@ -232,11 +234,11 @@ def get_multimodal_gt(dataset_test):
         num_mult.append(len(ind[0]))
    
     num_mult = np.array(num_mult)
-    logger.info('')
-    logger.info('')
-    logger.info('=' * 80)
-    logger.info(f'#1 future: {len(np.where(num_mult == 1)[0])}/{pd.shape[0]}')
-    logger.info(f'#<10 future: {len(np.where(num_mult < 10)[0])}/{pd.shape[0]}')
+    # logger.info('')
+    # logger.info('')
+    # logger.info('=' * 80)
+    # logger.info(f'#1 future: {len(np.where(num_mult == 1)[0])}/{pd.shape[0]}')
+    # logger.info(f'#<10 future: {len(np.where(num_mult < 10)[0])}/{pd.shape[0]}')
     return traj_gt_arr
 
 def get_prediction(data, model, sample_num, num_seeds=1, concat_hist=True):
@@ -305,12 +307,12 @@ def test(model, epoch):
             stats_meter[stats].update(val)
             if type(branches) is not int:
                 stats_meter[stats + '_stat'].update(branches)
-
-    logger.info('=' * 80)
-    for stats in stats_names:
-        str_stats = f'Total {stats}: ' + f'{stats_meter[stats].avg}'
-        logger.info(str_stats)
-    logger.info('=' * 80)
+    # logger.info('=' * 80)
+    # for stats in stats_names:
+    #     str_stats = f'Total {stats}: ' + f'{stats_meter[stats].avg}'
+    #     logger.info(str_stats)
+    # logger.info('=' * 80)
+    return
 
 
 def visualize():
@@ -330,7 +332,6 @@ def visualize():
         return pred
 
     def pose_generator():
-
         while True:
             data, data_multimodal, action = dataset_test.sample(n_modality=10)
             gt = data[0].copy()
@@ -342,7 +343,6 @@ def visualize():
                 pred = post_process(pred, data)
                 for i in range(pred.shape[0]):
                     poses[f'{i}'] = pred[i]
-
             yield poses
 
     pose_gen = pose_generator()
@@ -350,17 +350,182 @@ def visualize():
         render_animation(dataset.skeleton, pose_gen, cfg.t_his, ncol=12, output='./results/{}/results/'.format(args.cfg), index_i=i)
 
 
+def visualization(model, epoch, action='all'):
+    from visualization.vis_pose import plt_row_mixtures
+    from visualization.vis_skeleton import VisSkeleton
 
+    vis_skeleton = VisSkeleton(parents=[-1, 0, 1, 2, 3, 1, 5, 6, 0, 8, 9, 0, 11, 12, 1],
+                                joints_left=[2, 3, 4, 8, 9, 10],
+                                joints_right=[5, 6, 7, 11, 12, 13])
+    
+    save_subdir = action
+    save_dir = os.path.join(os.getcwd(), 'output/imgs/HumanEva', save_subdir)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    print("save_dir:" + str(save_dir))
+    
+    data_gen = dataset_test.iter_generator(step=cfg.t_his)
+    for idx, (data, _) in enumerate(data_gen):
+        
+        gt = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)[:, t_his:, :]
+        gz = np.zeros(shape=(gt.shape[0], gt.shape[1], 45))
+        gz[..., 3:] = gt
+        gz = np.reshape(gz, newshape=(gz.shape[0], gz.shape[1], 15, 3))
+        x_pred = gz[:, [11, 23, 35, 47, 59]]  
+
+        pred = get_prediction(data, model, sample_num=1, num_seeds=1, concat_hist=False)
+        pz = np.zeros(shape=(pred.shape[0], pred.shape[1], pred.shape[2], 45))
+        pz[..., 3:] = pred
+        pz = np.reshape(pz, newshape=(pz.shape[0], pz.shape[1], pz.shape[2], 15, 3))
+        pz = pz[:, (0,5,10,15,20,25,30,35,40,45), 15:]
+        y = pz[:, :, [11, 23, 35, 47, 59]]
+        y = np.swapaxes(y, 1, 2)      
+
+        for j in range(y.shape[0]):
+            mixtures_lists = []
+            for p in range(y.shape[1]):
+                mixtures_lists.append([])
+                for q in range(y.shape[2]):
+                    mixtures_lists[p].append(y[j, p, q])
+            
+            plt_row_mixtures(
+                skeleton = vis_skeleton,
+                pose = mixtures_lists,
+                type = "3D",
+                lcolor = "#3498db", rcolor = "#e74c3c",
+                view = (0, 0, 0),
+                titles = None,
+                add_labels = False, 
+                only_pose = True,
+                save_dir = save_dir, 
+                save_name = 'SLD_' + str(idx) + '_mix'
+            )
+
+            poses = [x_pred[j,k] for k in range(x_pred.shape[1])]
+            plt_row_mixtures(
+                skeleton = vis_skeleton,
+                pose = poses,
+                type = "3D",
+                lcolor = "#3498db", rcolor = "#e74c3c",
+                view = (0, 0, 0),
+                titles = None,
+                add_labels = False, 
+                only_pose = True,
+                save_dir = save_dir, 
+                save_name = 'SLD_' + str(idx)
+            )
+    return
+
+
+def CMD_test(model, epoch):
+    idx_to_class = ['directions', 'discussion', 'eating', 'greeting', 'phoning', \
+                    'posing', 'purchases', 'sitting', 'sittingdown', 'smoking',  \
+                    'photo', 'waiting', 'walking', 'walkdog', 'walktogether']
+    mean_motion_per_class = [0.004528946212615328, 0.005068199383505345, 0.003978791804673771,  0.005921345536787865,   0.003595039379111546, 
+                            0.004192961478268034, 0.005664689143238568, 0.0024945400286369122, 0.003543066357658834,   0.0035990843311130487, 
+                            0.004356865838457266, 0.004219841185066826, 0.007528046315984569,  0.00007054820734533077, 0.006751761745020258]  
+
+    def CMD(val_per_frame, val_ref):
+        T = len(val_per_frame) + 1
+        return np.sum([(T - t) * np.abs(val_per_frame[t-1] - val_ref) for t in range(1, T)])
+
+    def CMD_helper(pred):
+        pred_flat = pred   # shape: [batch, num_s, t_pred, joint, 3]
+        # M = (torch.linalg.norm(pred_flat[:,:,1:] - pred_flat[:,:,:-1], axis=-1)).mean(axis=1).mean(axis=-1)    
+        M = np.linalg.norm(pred_flat[:,:,1:] - pred_flat[:,:,:-1], axis=-1).mean(axis=1).mean(axis=-1) 
+        return M
+
+    def CMD_pose(data, label):
+        ret = 0
+        # CMD weighted by class
+        for i, (name, class_val_ref) in enumerate(zip(idx_to_class, mean_motion_per_class)):
+            mask = label == name
+            if mask.sum() == 0:
+                continue
+            motion_data_mean = data[mask].mean(axis=0)
+            ret += CMD(motion_data_mean, class_val_ref) * (mask.sum() / label.shape[0])
+        return ret
+
+    data_gen = dataset_test.iter_generator(step=cfg.t_his, afg=True)
+    num_samples = 0
+    num_seeds = 1
+
+    M_list, label_list = [], []
+    # data_shape: (1, 125, 17, 3)
+    for data, _, action in data_gen:
+    # for i, (data, _, action) in tqdm(enumerate(data_gen)):
+        action = str.lower(re.sub(r'[0-9]+', '', action))
+        action = re.sub(" ", "", action)
+        
+        if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
+            break
+        num_samples += 1
+        gt = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)[:, t_his:, :]
+        # gt_multi = traj_gt_arr[i]
+        # if gt_multi.shape[0] == 1:
+        #     continue
+        
+        # pred_shape: (1, 50, 125, 48)
+        pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        pred = pred[:,:,t_his:,:]
+        pred = pred.reshape(1, 50, 100, 16, 3)
+        
+        M = CMD_helper(pred)
+        M_list.append(M)
+        label_list.append(action)
+
+    M_all = np.concatenate(M_list, 0)
+    label_all = np.array(label_list)
+    
+    cmd_score = CMD_pose(M_all, label_all) 
+    print(cmd_score)
+    return
+    
+
+def FID_test(model, epoch, classifier):
+    data_gen = dataset_test.iter_generator(step=cfg.t_his, afg=True)
+    num_samples = 0
+    num_seeds = 1
+
+    pred_act_list, gt_act_list = [], []
+    # data_shape: (1, 125, 17, 3)
+    for i, (data, _, action) in tqdm(enumerate(data_gen)):
+        action = str.lower(re.sub(r'[0-9]+', '', action))
+        action = re.sub(" ", "", action)
+        
+        if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
+            break
+        num_samples += 1
+        gt = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)[:, t_his:, :]
+        gt = np.repeat(gt, 50, axis=0)
+        gt = np.swapaxes(gt, 1, 2)
+        gt = torch.tensor(gt, device=device)
+        
+        # pred_shape: (1, 50, 125, 48)
+        pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        pred = pred[:,:,t_his:,:]
+        pred = np.swapaxes(pred, -2, -1)
+        pred = pred.reshape(50, 48, 100)
+        pred = torch.tensor(pred, device=device)
+        
+        pred_activations = classifier.get_fid_features(motion_sequence=pred).cpu().data.numpy()
+        gt_activations   = classifier.get_fid_features(motion_sequence=gt).cpu().data.numpy()
+        
+        pred_act_list.append(pred_activations)
+        gt_act_list.append(gt_activations)
+        
+    results_fid = fid(np.concatenate(pred_act_list, 0), np.concatenate(gt_act_list, 0))
+    print(results_fid)
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg',
-                        default='h36m')
-    parser.add_argument('--mode', default='train')
+                        default='humaneva')
+    parser.add_argument('--mode', default='vis')
     parser.add_argument('--test', action='store_true', default=False)
-    parser.add_argument('--iter', type=int, default=0)
+    parser.add_argument('--iter', type=int, default=500)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--gpu_index', type=int, default=0)
     parser.add_argument('--n_pre', type=int, default=8)
@@ -369,7 +534,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_coupling_layer', type=int, default=4)
     parser.add_argument('--multimodal_threshold', type=float, default=0.5)
     args = parser.parse_args()
-
+    
     """setup"""
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -379,8 +544,8 @@ if __name__ == '__main__':
     device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
     
     cfg = Config(f'{args.cfg}', test=args.test)
-    tb_logger = SummaryWriter(cfg.tb_dir) if args.mode == 'train' else None
-    logger = create_logger(os.path.join(cfg.log_dir, 'log.txt'))
+    # tb_logger = SummaryWriter(cfg.tb_dir) if args.mode == 'train' else None
+    # logger = create_logger(os.path.join(cfg.log_dir, 'log.txt'))
 
     """parameter"""
     mode = args.mode
@@ -424,7 +589,6 @@ if __name__ == '__main__':
     
     scheduler = get_scheduler(optimizer, policy='lambda', nepoch_fix=cfg.num_epoch_fix, nepoch=cfg.num_epoch)
 
-
     cp_path = 'results/h36m_nf/models/0025.p' if cfg.dataset == 'h36m' else 'results/humaneva_nf/models/0025.p'
     print('loading model from checkpoint: %s' % cp_path)
     model_cp = pickle.load(open(cp_path, "rb"))
@@ -462,13 +626,25 @@ if __name__ == '__main__':
     elif mode == 'test':
         model.to(device)
         model.eval()
-        
         with torch.no_grad():
-            test(model,args.iter) 
-
+            test(model, args.iter) 
     
-    elif mode == 'viz':
+    elif mode == 'CMD':
         model.to(device)
         model.eval()
         with torch.no_grad():
-            visualize()
+            CMD_test(model, args.iter)        
+
+    elif mode == 'FID':
+        classifier = classifier_fid_factory(device)
+        model.to(device)
+        model.eval()
+        with torch.no_grad():
+            FID_test(model, args.iter, classifier)   
+
+    elif mode == 'vis':
+        model.to(device)
+        model.eval()
+        with torch.no_grad():
+            # visualize()
+            visualization(model, args.iter)

@@ -41,7 +41,7 @@ class Config:
         self.num_epoch = cfg['num_epoch']
         self.num_epoch_fix = cfg.get('num_epoch_fix', self.num_epoch)
         self.num_data_sample = cfg['num_data_sample']
-        self.model_path = os.path.join(self.model_dir, '%04d.p')
+        self.model_path = os.path.join(self.model_dir, '%04d_cpu.p')
         self.poses_prediction_path = os.path.join(self.model_dir, 'poses_prediction%04d.p')
         self.poses_vae_path = os.path.join(self.model_dir, 'poses_vae_%04d.p')
         self.poses_mapping_path = os.path.join(self.model_dir, 'poses_mapping_%04d.p')

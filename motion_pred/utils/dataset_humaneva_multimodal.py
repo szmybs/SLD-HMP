@@ -6,7 +6,6 @@ from utils import util
 
 
 class DatasetHumanEva(Dataset):
-
     def __init__(self, mode, t_his=15, t_pred=60, actions='all', **kwargs):
         if 'multimodal_path' in kwargs.keys():
             self.multimodal_path = kwargs['multimodal_path']

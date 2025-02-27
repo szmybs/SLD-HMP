@@ -168,7 +168,7 @@ class DatasetH36M(Dataset):
             sample_multi = np.concatenate(sample_multi, axis=0)
             yield sample, sample_multi
 
-    def iter_generator(self, step=25, n_modality=10):
+    def iter_generator(self, step=25, n_modality=10, afg=False):
         for sub in self.data.keys():
             data_s = self.data[sub]
             candi_tmp = self.data_candi[sub]
@@ -212,7 +212,10 @@ class DatasetH36M(Dataset):
                     else:
                         traj_multi = None
 
-                    yield traj, traj_multi
+                    if afg:
+                        yield traj, traj_multi, act
+                    else:
+                        yield traj, traj_multi
 
 
 if __name__ == '__main__':
