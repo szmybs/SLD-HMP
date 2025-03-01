@@ -69,3 +69,17 @@ def classifier_fid_factory(device):
     classifier_for_fid.load_state_dict(classifier_state["model"])
     classifier_for_fid.eval()
     return classifier_for_fid
+
+
+def classifier_fid_humaneva_factory(device):
+    classifier_for_fid = ClassifierForFID(input_size   = 42, 
+                                          hidden_size  = 128, 
+                                          hidden_layer = 2,
+                                          output_size  = 5, 
+                                          device = device, 
+                                          use_noise = None).to(device)                
+    classifier_path = os.path.join(os.getcwd(), "FID", "humaneva_classifier.pth")
+    classifier_state = torch.load(classifier_path, map_location=device)
+    classifier_for_fid.load_state_dict(classifier_state["model"])
+    classifier_for_fid.eval()
+    return classifier_for_fid

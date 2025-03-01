@@ -194,13 +194,17 @@ class DatasetHumanEva(Dataset):
     #
     #                 yield traj, traj_multi
 
-    def iter_generator(self, step=25):
+    def iter_generator(self, step=25, afg=False):
         for data_s in self.data.values():
-            for seq in data_s.values():
+            for act, seq in data_s.items():
+                act = act.split()[0]
                 seq_len = seq.shape[0]
                 for i in range(0, seq_len - self.t_total, step):
                     traj = seq[None, i: i + self.t_total]
-                    yield traj, None
+                    if afg:
+                        yield traj, None, act
+                    else:
+                        yield traj, act
 
 
 if __name__ == '__main__':

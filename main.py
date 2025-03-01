@@ -16,12 +16,151 @@ from models.motion_pred import *
 from utils import util, valid_angle_check
 from utils.metrics import *
 from FID.fid import fid
-from FID.fid_classifier import classifier_fid_factory
+from FID.fid_classifier import classifier_fid_factory, classifier_fid_humaneva_factory
 from scipy.spatial.distance import pdist, squareform
 from tqdm import tqdm
 import random
 import re
 import time
+import math
+from abc import ABC
+from torch import Tensor
+
+
+def kde(y, y_pred):
+    y, y_pred = torch.from_numpy(y).float().to(torch.device('cuda')), torch.from_numpy(y_pred).float().to(torch.device('cuda'))
+    bs, sp, ts, ns, d = y_pred.shape
+    kde_ll = torch.zeros((bs, ts, ns), device=y_pred.device)
+
+    for b in range(bs):
+        for t in range(ts):
+            for n in range(ns):
+                try:
+                    kernel = GaussianKDE(y_pred[b, :, t, n, :])
+                except BaseException:
+                    print("b: %d - t: %d - n: %d" % (b, t, n))
+                    continue
+                # pred_prob = kernel(y_pred[:, b, t, :, n])
+                gt_prob = kernel(y[b, None, t, n, :])
+                kde_ll[b, t, n] = gt_prob
+    # mean_kde_ll = torch.mean(kde_ll)
+    mean_kde_ll = torch.mean(torch.mean(kde_ll, dim=-1), dim=0)[None]
+    return mean_kde_ll
+
+  
+class DynamicBufferModule(ABC, torch.nn.Module):
+    """Torch module that allows loading variables from the state dict even in the case of shape mismatch."""
+    
+    def get_tensor_attribute(self, attribute_name: str) -> Tensor:
+        """Get attribute of the tensor given the name.
+        Args:
+            attribute_name (str): Name of the tensor
+        Raises:
+            ValueError: `attribute_name` is not a torch Tensor
+        Returns:
+            Tensor: Tensor attribute
+        """
+        attribute = getattr(self, attribute_name)
+        if isinstance(attribute, Tensor):
+            return attribute
+        raise ValueError(f"Attribute with name '{attribute_name}' is not a torch Tensor")
+
+    def _load_from_state_dict(self, state_dict: dict, prefix: str, *args):
+        """Resizes the local buffers to match those stored in the state dict.
+        Overrides method from parent class.
+        Args:
+          state_dict (dict): State dictionary containing weights
+          prefix (str): Prefix of the weight file.
+          *args:
+        """
+        persistent_buffers = {k: v for k, v in self._buffers.items() if k not in self._non_persistent_buffers_set}
+        local_buffers = {k: v for k, v in persistent_buffers.items() if v is not None}
+
+        for param in local_buffers.keys():
+            for key in state_dict.keys():
+                if key.startswith(prefix) and key[len(prefix) :].split(".")[0] == param:
+                    if not local_buffers[param].shape == state_dict[key].shape:
+                        attribute = self.get_tensor_attribute(param)
+                        attribute.resize_(state_dict[key].shape)
+        super()._load_from_state_dict(state_dict, prefix, *args)
+        
+
+class GaussianKDE(DynamicBufferModule):
+    """Gaussian Kernel Density Estimation.
+    Args:
+        dataset (Optional[Tensor], optional): Dataset on which to fit the KDE model. Defaults to None.
+    """
+
+    def __init__(self, dataset):
+        super().__init__()
+
+        self.register_buffer("bw_transform", Tensor())
+        self.register_buffer("dataset", Tensor())
+        self.register_buffer("norm", Tensor())
+        
+        if dataset is not None:
+            self.fit(dataset)
+        
+        
+    def forward(self, features: Tensor) -> Tensor:
+        """Get the KDE estimates from the feature map.
+        Args:
+          features (Tensor): Feature map extracted from the CNN
+        Returns: KDE Estimates
+        """
+        features = torch.matmul(features, self.bw_transform)
+
+        estimate = torch.zeros(features.shape[0]).to(features.device)
+        for i in range(features.shape[0]):
+            embedding = ((self.dataset - features[i]) ** 2).sum(dim=1)
+            embedding = self.log_norm - (embedding / 2)
+            estimate[i] = torch.mean(embedding)
+        return estimate
+
+
+    def fit(self, dataset: Tensor) -> None:
+        """Fit a KDE model to the input dataset.
+        Args:
+          dataset (Tensor): Input dataset.
+        Returns:
+            None
+        """        
+        num_samples, dimension = dataset.shape
+
+        # compute scott's bandwidth factor
+        factor = num_samples ** (-1 / (dimension + 4))
+
+        cov_mat = self.cov(dataset.T)
+        inv_cov_mat = torch.linalg.inv(cov_mat)
+        inv_cov = inv_cov_mat / factor**2
+        
+        # transform data to account for bandwidth
+        bw_transform = torch.linalg.cholesky(inv_cov)
+        dataset = torch.matmul(dataset, bw_transform)
+        
+        #
+        norm = torch.prod(torch.diag(bw_transform))
+        norm *= math.pow((2 * math.pi), (-dimension / 2))
+
+        self.bw_transform = bw_transform
+        self.dataset = dataset
+        self.norm = norm
+        self.log_norm = torch.log(self.norm)
+        return
+
+
+    @staticmethod
+    def cov(tensor: Tensor) -> Tensor:
+        """Calculate the unbiased covariance matrix.
+        Args:
+            tensor (Tensor): Input tensor from which covariance matrix is computed.
+        Returns:
+            Output covariance matrix.
+        """
+        mean = torch.mean(tensor, dim=1, keepdim=True)
+        cov = torch.matmul(tensor - mean, (tensor - mean).T) / (tensor.size(1) - 1)
+        return cov
+
 
 
 def recon_loss(Y_g, Y, Y_mm, Y_hg=None, Y_h=None):
@@ -294,6 +433,7 @@ def test(model, epoch):
             continue
     
         pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        # pred = pred[:, (5, 15, 25, 35, 45)]
         pred = pred[:,:,t_his:,:]
         for stats in stats_names[:8]:
             val = 0
@@ -469,6 +609,7 @@ def CMD_test(model, epoch):
         pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
         pred = pred[:,:,t_his:,:]
         pred = pred.reshape(1, 50, 100, 16, 3)
+        pred = pred[:, (5, 15, 25, 35, 45)]
         
         M = CMD_helper(pred)
         M_list.append(M)
@@ -480,8 +621,60 @@ def CMD_test(model, epoch):
     cmd_score = CMD_pose(M_all, label_all) 
     print(cmd_score)
     return
-    
 
+
+def CMD_test_eva(model, epoch):
+    idx_to_class = ['Box', 'Gestures', 'Jog', 'ThrowCatch', 'Walking']
+    mean_motion_per_class = [0.010139551, 0.0021507503, 0.010850595,  0.004398426,   0.006771291]  
+
+    def CMD(val_per_frame, val_ref):
+        T = len(val_per_frame) + 1
+        return np.sum([(T - t) * np.abs(val_per_frame[t-1] - val_ref) for t in range(1, T)])
+
+    def CMD_helper(pred):
+        pred_flat = pred   # shape: [batch, num_s, t_pred, joint, 3] 
+        M = np.linalg.norm(pred_flat[:,:,1:] - pred_flat[:,:,:-1], axis=-1).mean(axis=1).mean(axis=-1) 
+        return M
+
+    def CMD_pose(data, label):
+        ret = 0
+        # CMD weighted by class
+        for i, (name, class_val_ref) in enumerate(zip(idx_to_class, mean_motion_per_class)):
+            mask = label == name
+            if mask.sum() == 0:
+                continue
+            motion_data_mean = data[mask].mean(axis=0)
+            ret += CMD(motion_data_mean, class_val_ref) * (mask.sum() / label.shape[0])
+        return ret
+
+    data_gen = dataset_test.iter_generator(step=cfg.t_his, afg=True)
+    num_samples = 0
+    num_seeds = 1
+
+    M_list, label_list = [], []
+    for data, _, action in data_gen:        
+        if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
+            break
+        num_samples += 1
+        gt = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)[:, t_his:, :]
+
+        pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        pred = pred[:,:,t_his:,:]
+        pred = pred.reshape(1, 50, 60, 14, 3)
+        pred = pred[:, (5, 15, 25, 35, 45)]
+        
+        M = CMD_helper(pred)
+        M_list.append(M)
+        label_list.append(action)
+
+    M_all = np.concatenate(M_list, 0)
+    label_all = np.array(label_list)
+    
+    cmd_score = CMD_pose(M_all, label_all) 
+    print(cmd_score)
+    return
+
+    
 def FID_test(model, epoch, classifier):
     data_gen = dataset_test.iter_generator(step=cfg.t_his, afg=True)
     num_samples = 0
@@ -490,8 +683,8 @@ def FID_test(model, epoch, classifier):
     pred_act_list, gt_act_list = [], []
     # data_shape: (1, 125, 17, 3)
     for i, (data, _, action) in tqdm(enumerate(data_gen)):
-        action = str.lower(re.sub(r'[0-9]+', '', action))
-        action = re.sub(" ", "", action)
+        # action = str.lower(re.sub(r'[0-9]+', '', action))
+        # action = re.sub(" ", "", action)
         
         if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
             break
@@ -501,11 +694,22 @@ def FID_test(model, epoch, classifier):
         gt = np.swapaxes(gt, 1, 2)
         gt = torch.tensor(gt, device=device)
         
+        ''' ### h36m
         # pred_shape: (1, 50, 125, 48)
         pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
         pred = pred[:,:,t_his:,:]
         pred = np.swapaxes(pred, -2, -1)
         pred = pred.reshape(50, 48, 100)
+        # pred = pred[(5, 15, 25, 35, 45), ...]
+        pred = torch.tensor(pred, device=device)
+        '''
+
+        # pred_shape: (1, 50, 125, 48)
+        pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        pred = pred[:,:,t_his:,:]
+        pred = np.swapaxes(pred, -2, -1)
+        pred = pred.reshape(50, 42, 60)
+        pred = pred[(5, 15, 25, 35, 45), ...]
         pred = torch.tensor(pred, device=device)
         
         pred_activations = classifier.get_fid_features(motion_sequence=pred).cpu().data.numpy()
@@ -518,12 +722,47 @@ def FID_test(model, epoch, classifier):
     print(results_fid)
 
 
+def KDE_test(model, epoch):
+    data_gen = dataset.iter_generator(step=cfg.t_his)
+    num_samples = 0
+    num_seeds = 1
+    
+    kde_list = []
+    for i, (data, _) in tqdm(enumerate(data_gen)):
+        if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
+            break
+        num_samples += 1
+        gt = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)[:, t_his:, :]
+        gt = np.reshape(gt, (gt.shape[0], gt.shape[1], -1, 3))
+
+        pred_thousand = []
+        
+        for j in range(20):
+            pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+            pred = pred[:,:,t_his:,:]  
+            pred_thousand.append(pred)
+        pred_thousand = np.concatenate(pred_thousand, axis=1)
+        pred = pred_thousand
+        pred = np.reshape(pred, (pred.shape[0], pred.shape[1], pred.shape[2], -1, 3))
+        # pred = get_prediction(data, model, sample_num=1, num_seeds=num_seeds, concat_hist=False)
+        # pred = pred[:,:,t_his:,:]  
+        
+        kde_list.append(kde(y=gt, y_pred=pred))
+
+    kde_ll = torch.cat(kde_list, dim=0)
+    kde_ll = torch.mean(kde_ll, dim=0)
+    kde_ll_np = kde_ll.to('cpu').numpy()
+    print(kde_ll_np)
+    return
+
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg',
                         default='humaneva')
-    parser.add_argument('--mode', default='vis')
+    parser.add_argument('--mode', default='CMD')
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--iter', type=int, default=500)
     parser.add_argument('--seed', type=int, default=1)
@@ -546,7 +785,7 @@ if __name__ == '__main__':
     cfg = Config(f'{args.cfg}', test=args.test)
     # tb_logger = SummaryWriter(cfg.tb_dir) if args.mode == 'train' else None
     # logger = create_logger(os.path.join(cfg.log_dir, 'log.txt'))
-
+        
     """parameter"""
     mode = args.mode
     nz = cfg.nz
@@ -633,10 +872,13 @@ if __name__ == '__main__':
         model.to(device)
         model.eval()
         with torch.no_grad():
-            CMD_test(model, args.iter)        
+            if cfg.dataset == 'h36m':
+                CMD_test(model,args.iter)
+            else:
+                CMD_test_eva(model,args.iter)     
 
     elif mode == 'FID':
-        classifier = classifier_fid_factory(device)
+        classifier = classifier_fid_factory(device) if cfg.dataset == 'h36m' else classifier_fid_humaneva_factory(device)
         model.to(device)
         model.eval()
         with torch.no_grad():
@@ -648,3 +890,9 @@ if __name__ == '__main__':
         with torch.no_grad():
             # visualize()
             visualization(model, args.iter)
+    
+    elif mode == 'KDE':
+        model.to(device)
+        model.eval()
+        with torch.no_grad():
+            KDE_test(model, args.iter)
