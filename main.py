@@ -723,12 +723,13 @@ def FID_test(model, epoch, classifier):
 
 
 def KDE_test(model, epoch):
-    data_gen = dataset.iter_generator(step=cfg.t_his)
+    data_gen = dataset_test.iter_generator(step=cfg.t_his)
     num_samples = 0
     num_seeds = 1
     
     kde_list = []
     for i, (data, _) in tqdm(enumerate(data_gen)):
+        torch.cuda.empty_cache()
         if args.mode == 'train' and (i >= 500 and (epoch + 1) % 50 != 0 and (epoch + 1) < cfg.num_epoch - 100):
             break
         num_samples += 1
@@ -761,8 +762,8 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg',
-                        default='humaneva')
-    parser.add_argument('--mode', default='CMD')
+                        default='h36m')
+    parser.add_argument('--mode', default='KDE')
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--iter', type=int, default=500)
     parser.add_argument('--seed', type=int, default=1)
