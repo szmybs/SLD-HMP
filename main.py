@@ -394,11 +394,24 @@ def get_prediction(data, model, sample_num, num_seeds=1, concat_hist=True):
     X = X.repeat((1, sample_num * num_seeds, 1))
     Y_gt = Y_gt.repeat((1, sample_num * num_seeds, 1))
     
+    print('warm up ... \n')
+    runtime_cost_list = []
+    for _ in range(1000):
+        start = time.time()
+        Y, _, _ = model(X)
+        torch.cuda.synchronize()
+        end = time.time()
+        print('Time:{}ms'.format((end-start)*1000))
+        runtime_cost_list.append((end-start)*1000)
+    runtime_cost = np.array(runtime_cost_list)
+    runtime_cost = runtime_cost[1:]
+    runtime_mean, runtime_std = np.mean(runtime_cost), np.std(runtime_cost)
+    print(runtime_mean)
+    print(runtime_std)
     
     Y, mu, logvar = model(X)
     
     if concat_hist:
-        
         X = X.unsqueeze(2).repeat(1, sample_num * num_seeds, cfg.nk, 1)
         Y = Y[t_his:].unsqueeze(1)
         Y = torch.cat((X, Y), dim=0)
@@ -762,7 +775,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg',
                         default='humaneva')
-    parser.add_argument('--mode', default='CMD')
+    parser.add_argument('--mode', default='KDE')
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--iter', type=int, default=500)
     parser.add_argument('--seed', type=int, default=1)
