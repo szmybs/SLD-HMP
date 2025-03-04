@@ -400,6 +400,7 @@ def get_prediction(data, model, sample_num, num_seeds=1, concat_hist=True):
         start = time.time()
         Y, _, _ = model(X)
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         end = time.time()
         print('Time:{}ms'.format((end-start)*1000))
         runtime_cost_list.append((end-start)*1000)
@@ -775,8 +776,8 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg',
-                        default='humaneva')
-    parser.add_argument('--mode', default='CMD')
+                        default='h36m')
+    parser.add_argument('--mode', default='KDE')
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--iter', type=int, default=500)
     parser.add_argument('--seed', type=int, default=1)
